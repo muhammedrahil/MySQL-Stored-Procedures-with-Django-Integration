@@ -235,3 +235,107 @@ CALL insert_user('JohnDoe', 'johndoe@example.com');
 
 🚀 **Happy Coding!** 🚀
 
+
+```sql
+ALTER TABLE pes_oempartnumber ADD FULLTEXT INDEX ft_partnumber (PartNumber);
+CREATE INDEX idx_created_at ON pes_oempartnumber(created_at);
+```
+```sql
+USE devpatriosoft_db;
+
+DELIMITER $$
+
+CREATE PROCEDURE `get_oem_part_numbers_paginator`(
+    IN search_text VARCHAR(256),
+    IN page_limit INT,
+    IN last_partnumber VARCHAR(256)  -- Used for keyset pagination
+)
+BEGIN
+    DECLARE adjusted_limit INT;
+    SET adjusted_limit = page_limit + 1;
+
+    -- Direct query handling both exact and partial matches
+    IF search_text IS NULL OR search_text = '' THEN
+        -- No search, fetch all records using keyset pagination
+        SELECT 
+            id,
+            partnumber,
+            IF(row_count > page_limit, TRUE, FALSE) AS has_next
+        FROM (
+            SELECT 
+                id,
+                partnumber,
+                ROW_NUMBER() OVER () as row_count
+            FROM devpatriosoft_db.PES_OEMPartNumber
+            WHERE (last_partnumber IS NULL OR partnumber > last_partnumber)
+            ORDER BY partnumber ASC
+            LIMIT adjusted_limit
+        ) t;
+    ELSE
+        -- Search with both exact and partial matches using keyset pagination
+        SELECT 
+            id,
+            partnumber,
+            IF(row_count > page_limit, TRUE, FALSE) AS has_next
+        FROM (
+            SELECT 
+                id,
+                partnumber,
+                ROW_NUMBER() OVER () as row_count
+            FROM (
+                -- First get exact matches
+                SELECT id, partnumber, created_at, 1 AS match_type
+                FROM devpatriosoft_db.PES_OEMPartNumber
+                WHERE partnumber = search_text
+
+                UNION ALL
+
+                -- Then get partial matches (StartsWith)
+                SELECT id, partnumber, created_at, 2 AS match_type
+                FROM devpatriosoft_db.PES_OEMPartNumber
+                WHERE partnumber LIKE CONCAT(search_text, '%')
+                AND partnumber != search_text
+            ) combined
+            WHERE (last_partnumber IS NULL OR partnumber > last_partnumber)
+            ORDER BY match_type, partnumber ASC
+            LIMIT adjusted_limit
+        ) t;
+    END IF;
+END
+$$ DELIMITER ;
+
+```
+
+```python
+
+def stored_procedures_dropdown(stored_procedures_fun: str,
+                                search_text : str, 
+                                page_limit : int, 
+                                last_text : int)->Tuple[List[Dict],bool,str]:
+    with connection.cursor() as cursor:
+        cursor.callproc(stored_procedures_fun, [search_text, page_limit, last_text])
+        results = cursor.fetchall()  # Fetch all results
+
+    if not results:
+        return [], False, last_text  # Handle empty results case
+
+    queryset = [{'id': row[0], 'name': row[1]} for row in results]
+    has_next = bool(results[-1][2])  # Extract has_next from the last row
+    last_text = results[-1][1]  # Extract last_text from the last row
+
+    return queryset, has_next, last_text
+
+ef get_items_interchanges(request):
+    dropdown = request.GET.get('dropdown')
+    search = request.GET.get('search')
+    if dropdown:
+        queryset = []
+        next_page_url = None
+        last_text = request.GET.get('last_text',None)
+        queryset , has_next, last_partnumber = stored_procedures_dropdown('get_oem_part_numbers_paginator',
+            search, 10, last_text)
+        if has_next:
+            next_page_url = reverse('app:name') + f"?dropdown=true&last_text={last_text}"
+        return JsonResponse({"data": queryset, "next_page_url": next_page_url}, status=200)
+```
+
